@@ -13,10 +13,6 @@ static u32 g_Base = 0;
 static u64 g_Scale = 0;
 static s64 g_Interval = 0;
 
-// Defined in threadHook.c.
-void profilerEnableThreadHook(void);
-void profilerDisableThreadHook(void);
-
 static void profilerThread(void*) {
     Handle timer;
     svcCreateTimer(&timer, RESET_PULSE);
@@ -47,20 +43,19 @@ static void profilerThread(void*) {
     LightLock_Unlock(&g_ProfilerLock);
 }
 
-static size_t hasher(const u8* key) { return *(u32*)key; }
-static bool comparator(const u8* lhs, const u8* rhs) { return *(u32*)lhs == *(u32*)rhs; }
+static size_t thMapHasher(const u8* key) { return *(u32*)key; }
+static bool thMapComparator(const u8* keya, const u8* keyb) { return *(u32*)keya == *(u32*)keyb; }
 
 void profilerInit(u16* buckets, size_t numBuckets, u32 base, size_t scale, s64 interval) {
     LightLock_Init(&g_ProfilerLock);
     LightLock_Lock(&g_ProfilerLock);
 
-    HashMapParams hmParams;
-    hmParams.numBuckets = 16;
-    hmParams.keySize = sizeof(u32);
-    hmParams.valueSize = sizeof(u32);
-    hmParams.hasher = hasher;
-    hmParams.comparator = comparator;
-    hashMapInit(&g_ThreadPCs, &hmParams);
+    g_ThreadPCs.numBuckets = 16;
+    g_ThreadPCs.keySize = sizeof(u32);
+    g_ThreadPCs.valueSize = sizeof(u32);
+    g_ThreadPCs.hasher = thMapHasher;
+    g_ThreadPCs.comparator = thMapComparator;
+    hashMapAlloc(&g_ThreadPCs);
 
     g_Buckets = buckets;
     g_NumBuckets = numBuckets;
@@ -70,14 +65,12 @@ void profilerInit(u16* buckets, size_t numBuckets, u32 base, size_t scale, s64 i
 
     APT_SetAppCpuTimeLimit(50);
     g_ProfilerThread = threadCreate(profilerThread, NULL, 0x1000, 0x18, 1, true);
-    profilerEnableThreadHook();
 
     LightLock_Unlock(&g_ProfilerLock);
 }
 
 void profilerExit(void) {
     LightLock_Lock(&g_ProfilerLock);
-    profilerDisableThreadHook();
 
     g_Buckets = NULL;
     g_NumBuckets = 0;
@@ -100,15 +93,30 @@ static u32 thisTid(void) {
 
 void profilerRegisterThread(u32 ep) {
     const u32 tid = thisTid();
-    hashMapInsert(&g_ThreadPCs, (const u8*)&tid, (const u8*)&ep);
+    LightLock_Lock(&g_ProfilerLock);
+
+    if (g_Buckets)
+        hashMapInsert(&g_ThreadPCs, (const u8*)&tid, (const u8*)&ep);
+
+    LightLock_Unlock(&g_ProfilerLock);
 }
 
 void profilerUnregisterThread(void) {
     const u32 tid = thisTid();
-    hashMapRemove(&g_ThreadPCs, (const u8*)&tid);
+    LightLock_Lock(&g_ProfilerLock);
+
+    if (g_Buckets)
+        hashMapRemove(&g_ThreadPCs, (const u8*)&tid);
+
+    LightLock_Unlock(&g_ProfilerLock);
 }
 
 void profilerUpdateThreadPC(u32 pc) {
     const u32 tid = thisTid();
-    hashMapUpdate(&g_ThreadPCs, (const u8*)&tid, (const u8*)&pc);
+    LightLock_Lock(&g_ProfilerLock);
+
+    if (g_Buckets)
+        hashMapUpdate(&g_ThreadPCs, (const u8*)&tid, (const u8*)&pc);
+
+    LightLock_Unlock(&g_ProfilerLock);
 }

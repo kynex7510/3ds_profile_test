@@ -5,15 +5,13 @@
 
 #define IS_POW2(v) !((v) & ((v) - 1))
 
-#define BUCKET_FOR_KEY(hm, key) (&hm->buckets[hm->params.hasher(key) & (hm->params.numBuckets - 1)])
-#define BUCKET_ENTRY_SIZE(hm) (hm->params.keySize + hm->params.valueSize)
+#define BUCKET_FOR_KEY(hm, key) (&hm->buckets[hm->hasher(key) & (hm->numBuckets - 1)])
+#define BUCKET_ENTRY_SIZE(hm) (hm->keySize + hm->valueSize)
 
-bool hashMapInit(HashMap* hm, const HashMapParams* params) {
+bool hashMapAlloc(HashMap* hm) {
     // Num of buckets must be a power of 2.
-    if (IS_POW2(params->numBuckets)) {
-        memcpy(&hm->params, params, sizeof(HashMapParams));
-        LightLock_Init(&hm->lock);
-        hm->buckets = calloc(hm->params.numBuckets, sizeof(HashMapBucket));
+    if (IS_POW2(hm->numBuckets)) {
+        hm->buckets = calloc(hm->numBuckets, sizeof(HashMapBucket));
         return hm->buckets;
     }
 
@@ -21,22 +19,19 @@ bool hashMapInit(HashMap* hm, const HashMapParams* params) {
 }
 
 void hashMapFree(HashMap* hm) {
-    LightLock_Lock(&hm->lock);
-
-    for (size_t i = 0; i < hm->params.numBuckets; ++i) {
+    for (size_t i = 0; i < hm->numBuckets; ++i) {
         HashMapBucket* bucket = &hm->buckets[i];
         free(bucket->storage);
     }
 
     free(hm->buckets);
-    LightLock_Unlock(&hm->lock);
 }
 
 static bool updateImpl(HashMap* hm, HashMapBucket* bucket, const u8* key, const u8* value) {
     for (size_t i = 0; i < bucket->count; ++i) {
         u8* p = &bucket->storage[i * BUCKET_ENTRY_SIZE(hm)];
-        if (hm->params.comparator(p, key)) {
-            memcpy(&p[hm->params.keySize], value, hm->params.valueSize);
+        if (hm->comparator(p, key)) {
+            memcpy(&p[hm->keySize], value, hm->valueSize);
             return true;
         }
     }
@@ -45,7 +40,6 @@ static bool updateImpl(HashMap* hm, HashMapBucket* bucket, const u8* key, const 
 }
 
 bool hashMapInsert(HashMap* hm, const u8* key, const u8* value) {
-    LightLock_Lock(&hm->lock);
     HashMapBucket* bucket = BUCKET_FOR_KEY(hm, key);
     bool success = false;
 
@@ -54,8 +48,8 @@ bool hashMapInsert(HashMap* hm, const u8* key, const u8* value) {
         if (newStorage) {
             bucket->storage = newStorage;
             u8* p = &bucket->storage[bucket->count * BUCKET_ENTRY_SIZE(hm)];
-            memcpy(p, key, hm->params.keySize);
-            memcpy(&p[hm->params.keySize], value, hm->params.valueSize);
+            memcpy(p, key, hm->keySize);
+            memcpy(&p[hm->keySize], value, hm->valueSize);
             ++bucket->count;
             success = true;
         }
@@ -63,18 +57,16 @@ bool hashMapInsert(HashMap* hm, const u8* key, const u8* value) {
         success = true;
     }
 
-    LightLock_Unlock(&hm->lock);
     return success;
 }
 
 bool hashMapRemove(HashMap* hm, const u8* key) {
-    LightLock_Lock(&hm->lock);
     HashMapBucket* bucket = BUCKET_FOR_KEY(hm, key);
     bool success = false;
 
     for (size_t i = 0; i < bucket->count; ++i) {
         u8* p = &bucket->storage[i * BUCKET_ENTRY_SIZE(hm)];
-        if (hm->params.comparator(p, key)) {
+        if (hm->comparator(p, key)) {
             u8* newStorage = malloc((bucket->count + 1) * BUCKET_ENTRY_SIZE(hm));
             if (newStorage) {
                 memcpy(newStorage, bucket->storage, i * BUCKET_ENTRY_SIZE(hm));
@@ -88,40 +80,59 @@ bool hashMapRemove(HashMap* hm, const u8* key) {
         }
     }
 
-    LightLock_Unlock(&hm->lock);
     return success;
 }
 
+bool hashMapGet(HashMap* hm, const u8* key, u8* value) {
+    const HashMapBucket* bucket = BUCKET_FOR_KEY(hm, key);
+    for (size_t i = 0; i < bucket->count; ++i) {
+        const u8* p = &bucket->storage[i * BUCKET_ENTRY_SIZE(hm)];
+        if (hm->comparator(p, key)) {
+            memcpy(value, &p[hm->keySize], hm->valueSize);
+            return true;
+        }
+    }
+
+    return false;
+}
+
 bool hashMapUpdate(HashMap* hm, const u8* key, const u8* value) {
-    LightLock_Lock(&hm->lock);
     HashMapBucket* bucket = BUCKET_FOR_KEY(hm, key);
     bool ret = updateImpl(hm, bucket, key, value);
-    LightLock_Unlock(&hm->lock);
     return ret;
 }
 
-static void getMultiImpl(HashMap* hm, u8* buffer, size_t* numItems, size_t maxItems, size_t itemSize, size_t itemOffset) {
+size_t hashMapGetNumItems(HashMap* hm) {
+    size_t count = 0;
+    for (size_t i = 0; i < hm->numBuckets; ++i) {
+        HashMapBucket* bucket = &hm->buckets[i];
+        count += bucket->count;
+    }
+
+    return count;
+}
+
+void hashMapGetItems(HashMap* hm, u8* keysBuffer, u8* valuesBuffer, size_t* numItems, size_t maxItems) {
+    if (!keysBuffer && !valuesBuffer) {
+        *numItems = 0;
+        return;
+    }
+
     size_t index = 0;
-    for (size_t i = 0; i < hm->params.numBuckets && index < maxItems; ++i) {
+    for (size_t i = 0; i < hm->numBuckets && index < maxItems; ++i) {
         const HashMapBucket* bucket = &hm->buckets[i];
         for (size_t j = 0; j < bucket->count && index < maxItems; ++j) {
             const u8* p = &bucket->storage[j * BUCKET_ENTRY_SIZE(hm)];
-            memcpy(&buffer[index * itemSize], &p[itemOffset], itemSize);
+
+            if (keysBuffer)
+                memcpy(&keysBuffer[index * hm->keySize], p, hm->keySize);
+
+            if (valuesBuffer)
+                memcpy(&valuesBuffer[index * hm->valueSize], &p[hm->keySize], hm->valueSize);
+
             ++index;
         }
     }
 
     *numItems = index;
-}
-
-void hashMapGetKeys(HashMap* hm, u8* buffer, size_t* numKeys, size_t maxKeys) {
-    LightLock_Lock(&hm->lock);
-    getMultiImpl(hm, buffer, numKeys, maxKeys, hm->params.keySize, 0);
-    LightLock_Unlock(&hm->lock);
-}
-
-void hashMapGetValues(HashMap* hm, u8* buffer, size_t* numValues, size_t maxValues) {
-    LightLock_Lock(&hm->lock);
-    getMultiImpl(hm, buffer, numValues, maxValues, hm->params.valueSize, hm->params.keySize);
-    LightLock_Unlock(&hm->lock);
 }

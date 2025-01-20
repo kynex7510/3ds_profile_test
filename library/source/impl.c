@@ -10,7 +10,10 @@
 
 static GmonCtx g_Ctx;
 
-void __mcount_internal(u32 fromPC, u32 selfPC) { profilerUpdateThreadPC(selfPC); }
+void __mcount_internal(u32 fromPC, u32 selfPC) {
+    profilerUpdateThreadPC(selfPC);
+    gmonAddArc(&g_Ctx, fromPC, selfPC);
+}
 
 static u32 readProcInfo(u32 type) {
     s64 v;
@@ -25,12 +28,14 @@ void userAppInit(void) {
     g_Ctx.textSize = readProcInfo(TEXT_SIZE_TYPE);
     g_Ctx.numBuckets = g_Ctx.textSize >> 2;
     g_Ctx.buckets = calloc(g_Ctx.numBuckets, sizeof(u16));
+    gmonInit(&g_Ctx);
+
     profilerInit(g_Ctx.buckets, g_Ctx.numBuckets, g_Ctx.textBase, 0x4000, DEFAULT_INTERVAL);
     profilerRegisterThread(0);
 }
 
 void userAppExit(void) {
     profilerExit();
-    gmonSave(&g_Ctx);
+    gmonSave(&g_Ctx, "sdmc:/gmon.out");
     free(g_Ctx.buckets);
 }
