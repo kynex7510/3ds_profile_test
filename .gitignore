@@ -1,0 +1,7 @@
+.vscode
+build
+*.3dsx
+*.smdh
+*.elf
+*.elf.*
+gmon.out
